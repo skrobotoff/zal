@@ -65,6 +65,8 @@ button{font:inherit;color:inherit;cursor:pointer}
 .sugg{margin-top:10px;font-size:15px}
 .sugg b{font-family:ui-rounded,"SF Pro Rounded",-apple-system,system-ui,sans-serif;font-weight:500}
 .why{font-size:13px;color:var(--muted)}
+.set.warn input:first-of-type{border-color:#E5484D;box-shadow:0 0 0 2px rgba(229,72,77,.25)}
+.set.warn .last{color:#E5484D;font-weight:700}
 .note{font-size:13px;color:var(--muted);margin-top:4px}
 .sets{margin-top:10px;display:grid;gap:6px}
 .set{display:grid;grid-template-columns:28px 1fr 18px 1fr 30px;align-items:center;gap:6px}
@@ -192,17 +194,91 @@ function exList(day,w){
   });
 }
 function logged(w,day,id){const L=S.logs[w+"-"+day];if(!L||!L.sets||!L.sets[id])return [];return L.sets[id].filter(s=>s&&num(s.w)>0&&num(s.r)>0).map(s=>({w:num(s.w),r:num(s.r)}));}
+/* ---------- анализ подходов ---------- */
+/* расчётный максимум на 1 раз по Эпли: показывает силу подхода независимо от веса и повторов */
+const e1=x=>x.w*(1+x.r/30);
+const median=a=>{const v=a.slice().sort((x,y)=>x-y),n=v.length;return n?(n%2?v[(n-1)/2]:(v[n/2-1]+v[n/2])/2):null;};
+/* убирает подходы, которые не похожи на рабочие: опечатки (100 вместо 10) и разминку (пустой гриф).
+   Сравнивает силу подхода с медианой этой тренировки и с прошлой тренировкой. */
+function clean(sets,ref){
+  if(!sets.length)return {sets:sets,bad:[]};
+  let base;
+  if(sets.length>=3)base=median(sets.map(e1));
+  else if(ref)base=ref;
+  else return {sets:sets,bad:[]};
+  const good=[],bad=[];
+  sets.forEach(x=>{const k=e1(x)/base;(k>1.6||k<0.55?bad:good).push(x);});
+  if(!good.length)return ref?{sets:[],bad:bad}:{sets:sets,bad:[]};
+  return {sets:good,bad:bad};
+}
 function history(day,id,w,range){
-  const out=[];
+  const raw=[];
   for(let i=w-1;i>=1;i--){
     if(isDeload(i)||i===26)continue;
     if(range&&(i<range[0]||i>range[1]))continue;
-    const l=logged(i,day,id);if(l.length)out.push({w:i,sets:l});
+    const l=logged(i,day,id);if(l.length)raw.push({w:i,raw:l});
   }
+  /* чистим от старых к новым: каждая тренировка сверяется с предыдущей чистой */
+  let ref=null;
+  for(let j=raw.length-1;j>=0;j--){const c=clean(raw[j].raw,ref);raw[j].sets=c.sets;raw[j].bad=c.bad;if(c.sets.length)ref=median(c.sets.map(e1));}
+  /* тренировку, где всё похоже на ошибку, пропускаем и опираемся на прошлую нормальную */
+  const ok=raw.filter(x=>x.sets.length);
+  if(ok.length&&raw.length&&!raw[0].sets.length)ok[0]=Object.assign({},ok[0],{bad:raw[0].bad,skipped:raw[0].w});
+  return ok;
+}
+function cleanSeries(day,id){
+  const out={};let ref=null;
+  for(let i=1;i<=26;i++){const l=logged(i,day,id);if(!l.length)continue;const c=clean(l,ref);if(!c.sets.length)continue;out[i]=c.sets;ref=median(c.sets.map(e1));}
   return out;
 }
-const topW=sets=>Math.max.apply(null,sets.map(s=>s.w));
-const repsStr=sets=>sets.map(s=>s.r).join(", ");
+/* рабочий вес = вес, с которым сделано больше всего подходов (при равенстве — меньший) */
+const topW=sets=>{const c={};sets.forEach(x=>{c[x.w]=(c[x.w]||0)+1;});let best=null,bn=0;Object.keys(c).forEach(k=>{const w=parseFloat(k),n=c[k];if(n>bn||(n===bn&&w<best)){best=w;bn=n;}});return best;};
+const mainSets=sets=>{const w=topW(sets);return sets.filter(x=>x.w===w);};
+const repsStr=sets=>{
+  if(sets.every(x=>x.w===sets[0].w))return fmt(sets[0].w)+" кг × "+sets.map(x=>x.r).join(", ");
+  const g=[];sets.forEach(x=>{const t=g[g.length-1];if(t&&t.w===x.w)t.r.push(x.r);else g.push({w:x.w,r:[x.r]});});
+  return g.map(t=>fmt(t.w)+" кг × "+t.r.join(", ")).join(", потом ");
+};
+const mixed=sets=>!sets.every(x=>x.w===sets[0].w);
+const plural=(n,a,b,c)=>{const m=n%10,h=n%100;return m===1&&h!==11?a:(m>=2&&m<=4&&(h<10||h>=20)?b:c);};
+function badNote(bad){
+  if(!bad||!bad.length)return "";
+  return " Не учитываю "+bad.map(x=>fmt(x.w)+" × "+x.r).join(", ")+": "+(bad.length>1?"не похожи":"не похоже")+" на рабочий подход (опечатка или разминка).";
+}
+/* разбор прошлой тренировки для обычного упражнения */
+function analyze(ex,last){
+  if(!last.sets.length)return {txt:"подбери вес",why:"Записи прошлой тренировки похожи на опечатку ("+last.bad.map(x=>fmt(x.w)+" × "+x.r).join(", ")+"). Проверь их или подбери вес на "+ex.lo+"–"+ex.hi+" повторов."};
+  const sets=last.sets,lw=topW(sets),m=sets.filter(x=>x.w===lw);
+  const heavier=sets.filter(x=>x.w>lw),lighter=sets.filter(x=>x.w<lw);
+  const maxR=Math.max.apply(null,m.map(x=>x.r)),minR=Math.min.apply(null,m.map(x=>x.r));
+  const seen="В прошлый раз "+repsStr(sets)+".";
+  let w,msg;
+  if(m.length>=ex.s&&minR>=ex.hi){
+    if(minR>=ex.hi+4){
+      /* сильно перевыполнил: считаем по силе, какой вес даст нижнюю границу повторов с запасом */
+      const best=Math.max.apply(null,m.map(e1));
+      w=Math.max(lw+ex.step,roundTo(best/(1+(ex.lo+2)/30),ex.step));
+      msg=" Это сильно выше диапазона "+ex.lo+"–"+ex.hi+", вес явно мал. Прибавляем сразу до "+fmt(w)+" кг.";
+    }else{w=lw+ex.step;msg=" Верх диапазона во всех подходах: +"+fmt(ex.step)+" кг, начинай снова с "+ex.lo+".";}
+  }else if(maxR<ex.lo){
+    w=Math.max(ex.step,lw-ex.step);
+    msg=" Ни разу не дотянул до "+ex.lo+" повторов на "+fmt(lw)+" кг: вес великоват. Сбавляем до "+fmt(w)+" кг и набираем повторы.";
+  }else if(lighter.length){
+    w=lw;
+    msg=" Под конец пришлось сбросить вес. Основной вес "+fmt(lw)+" кг: держим его, цель — все "+ex.s+" "+plural(ex.s,"подход","подхода","подходов")+" без сброса.";
+  }else if(m.length<ex.s&&!heavier.length){
+    w=lw;msg=" Подходов было меньше плана ("+m.length+" из "+ex.s+"). Тот же вес, сделай все.";
+  }else{
+    w=lw;msg=" Тот же вес, цель: "+ex.hi+" во всех подходах.";
+  }
+  if(heavier.length){
+    const hv=heavier.filter(x=>x.r>=ex.lo);
+    msg+=hv.length?" С "+fmt(heavier[0].w)+" кг ты сделал "+hv[0].r+": как только на "+fmt(lw)+" будет верх диапазона везде, туда и переходи."
+                  :" Попытка на "+fmt(heavier[0].w)+" кг была рановата, к ней вернёмся позже.";
+  }
+  const skip=last.skipped?" Записи недели "+last.skipped+" ("+last.bad.map(x=>fmt(x.w)+" × "+x.r).join(", ")+") не похожи на твои обычные подходы, поэтому считаю по неделе "+last.w+". Если там не опечатка, поправь цифры.":badNote(last.bad);
+  return {w:w,why:(last.skipped?"Неделя "+last.w+": "+repsStr(sets)+".":seen)+msg+skip};
+}
 function suggest(day,ex,w){
   if(isDeload(w)){
     const h=history(day,ex.id,w);
@@ -211,7 +287,7 @@ function suggest(day,ex,w){
   }
   if(ex.bench&&w===26){
     const h=history(day,"bench",w,[19,25]);
-    return h.length?{txt:"на максимум",why:"Последний рабочий: "+fmt(topW(h[0].sets))+" кг × "+repsStr(h[0].sets)+"."}:{txt:"на максимум",why:""};
+    return h.length?{txt:"на максимум",why:"Последний раз: "+repsStr(h[0].sets)+". Расчётный максимум на 1 раз ≈ "+fmt(Math.round(Math.max.apply(null,h[0].sets.map(e1))*2)/2)+" кг."}:{txt:"на максимум",why:""};
   }
   if(ex.bench){
     const b=blockOf(w),h=history(day,"bench",w,blockRange(b));
@@ -220,17 +296,17 @@ function suggest(day,ex,w){
       if(prev.length&&b>1)return {w:Math.max(BENCH[b].start,roundTo(topW(prev[0].sets)-2.5,2.5)),why:"Новый блок: меньше повторов, вес чуть выше. Если тяжело оставить запас, сбрось 2,5 кг."};
       return {w:BENCH[b].start,why:"Стартовый вес блока. Если запаса больше 3 повторов, добавь 2,5 кг."};
     }
-    const last=h[0],lw=topW(last.sets);
-    const hit=s=>s.sets.length>=ex.s&&s.sets.every(x=>x.r>=ex.hi);
-    if(hit(last))return {w:lw+2.5,why:"В прошлый раз "+fmt(lw)+" кг × "+repsStr(last.sets)+": всё сделал, добавляем."};
-    if(b===2&&h[1]&&!hit(h[1])&&topW(h[1].sets)===lw)return {w:lw-5,why:"Два раза подряд не дожал "+fmt(lw)+" кг. Откат на 5 кг и снова вверх."};
-    return {w:lw,why:"В прошлый раз "+fmt(lw)+" кг × "+repsStr(last.sets)+". Остаёмся, добиваем повторы."};
+    const last=h[0],lw=topW(last.sets),bn=badNote(last.bad);
+    const hit=s=>{const m=mainSets(s.sets);return m.length>=ex.s&&m.every(x=>x.r>=ex.hi);};
+    const mR=Math.max.apply(null,mainSets(last.sets).map(x=>x.r));
+    if(hit(last))return {w:lw+2.5,why:"В прошлый раз "+repsStr(last.sets)+": всё сделал, добавляем 2,5 кг."+bn};
+    if(b===2&&h[1]&&!hit(h[1])&&topW(h[1].sets)===lw)return {w:lw-5,why:"Два раза подряд не дожал "+fmt(lw)+" кг. Откат на 5 кг и снова вверх."+bn};
+    if(mR<ex.lo)return {w:lw-2.5,why:"В прошлый раз "+repsStr(last.sets)+": ни одного подхода на "+ex.lo+"+ повторов. Сбавляем 2,5 кг."+bn};
+    return {w:lw,why:"В прошлый раз "+repsStr(last.sets)+". Остаёмся на "+fmt(lw)+" кг, добиваем повторы."+bn};
   }
   const h=history(day,ex.id,w);
   if(!h.length)return {txt:"подбери вес",why:"Чтобы сделать "+ex.lo+"–"+ex.hi+" повторов с нужным запасом."};
-  const last=h[0],lw=topW(last.sets);
-  if(last.sets.length>=ex.s&&last.sets.every(x=>x.r>=ex.hi))return {w:lw+ex.step,why:"В прошлый раз "+fmt(lw)+" × "+repsStr(last.sets)+": верх диапазона во всех подходах. +"+fmt(ex.step)+" кг, начинай снова с "+ex.lo+"."};
-  return {w:lw,why:"В прошлый раз "+fmt(lw)+" × "+repsStr(last.sets)+". Тот же вес, цель: "+ex.hi+" во всех подходах."};
+  return analyze(ex,h[0]);
 }
 
 /* ---------- saving ---------- */
@@ -326,7 +402,9 @@ function renderDay(day){
         '<input inputmode="numeric" aria-label="Повторы, подход '+(i+1)+'" placeholder="'+(ex.lo===ex.hi?ex.hi:ex.lo+"–"+ex.hi)+'" value="'+esc(arr[i].r)+'">'+
         '<span class="last">'+(failSet?"отказ":"")+'</span>';
       const [wi,ri]=row.querySelectorAll("input");
-      wi.addEventListener("input",()=>{arr[i].w=wi.value.trim();save();});
+      const chk=()=>{const v=num(wi.value),ref=sg.w!=null?sg.w:null;const bad=ref&&v>0&&(v/ref>1.6||v/ref<0.5);row.classList.toggle("warn",!!bad);row.querySelector(".last").textContent=bad?"?":(failSet?"отказ":"");row.title=bad?"Проверь вес: подсказка "+fmt(ref)+" кг":"";};
+      wi.addEventListener("input",()=>{arr[i].w=wi.value.trim();save();chk();});
+      setTimeout(chk,0);
       ri.addEventListener("focus",()=>{if(!wi.value&&sg.w!=null){wi.value=fmt(sg.w);arr[i].w=wi.value;save();}});
       ri.addEventListener("input",()=>{arr[i].r=ri.value.trim();save();});
       sets.appendChild(row);
@@ -373,8 +451,8 @@ function renderProgress(){
   const draw=()=>{
     const o=all.find(a=>a.x.id===S.sel);
     const pts=[],e1=[],rows=[];
-    for(let i=1;i<=26;i++){const l=logged(i,o.d,o.x.id);if(l.length){const t=topW(l);pts.push({x:i,y:t});
-      const best=Math.max.apply(null,l.map(s=>s.w*(1+s.r/30)));e1.push({x:i,y:Math.round(best*2)/2});rows.push({w:i,t:t,r:repsStr(l),e:best});}}
+    const cs=cleanSeries(o.d,o.x.id);for(let i=1;i<=26;i++){const l=cs[i]||[];if(l.length){const t=topW(l);pts.push({x:i,y:t});
+      const best=Math.max.apply(null,l.map(s=>s.w*(1+s.r/30)));e1.push({x:i,y:Math.round(best*2)/2});rows.push({w:i,t:t,r:mixed(l)?repsStr(l):l.map(s=>s.r).join(", "),e:best});}}
     const box=document.getElementById("chartbox");
     if(!pts.length){box.innerHTML='<p class="note">Пока нет записей. Внеси веса и повторы в тренировке, и здесь появится график по неделям.</p>';return;}
     const series=[{pts:pts,c:"var(--court)"}];
